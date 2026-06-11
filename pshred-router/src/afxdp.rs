@@ -22,14 +22,19 @@ use xdpilone::{IfInfo, RingRx, Socket, SocketConfig, Umem, UmemConfig, User};
 
 use crate::{stats, RUNNING};
 
-/// UMEM frame size in bytes. Matches `UmemConfig::default().frame_size`.
+/// UMEM frame size in bytes (the default chunk; pshreds are ~200 B).
 const FRAME_SIZE: u64 = 1 << 12; // 4096
-/// Number of frames in the UMEM pool (4096 frames -> 16 MiB region).
-const NUM_FRAMES: u64 = 1 << 12;
-/// Frames primed into the shared fill ring (== `UmemConfig::default().fill_size`).
-const FILL_FRAMES: u32 = 1 << 11; // 2048
-/// Maximum descriptors read from one RX ring per drain pass.
-const RX_BATCH: u32 = 64;
+/// Frames in the UMEM pool. Must exceed the buffers in flight (fill + RX rings).
+/// 16384 * 4096 = 64 MiB.
+const NUM_FRAMES: u64 = 1 << 14;
+/// Shared fill-ring depth, and the number of buffers primed into it. Kept larger
+/// than a single RX ring so the pool cannot starve even when an RX ring is full
+/// and briefly undrained; a 2048/2048 sizing throttled delivery under load.
+const FILL_SIZE: u32 = 1 << 13; // 8192
+/// Per-proposer RX ring depth.
+const RX_SIZE: u32 = 1 << 12; // 4096
+/// Descriptors drained from one RX ring per pass; sized to empty it in one pass.
+const RX_BATCH: u32 = RX_SIZE;
 
 /// One proposer's AF_XDP socket. Holding `User` and `RingRx` keeps the socket
 /// fd open, which keeps its `XSKS` map entry valid.
@@ -56,10 +61,11 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     let area = NonNull::new(std::ptr::slice_from_raw_parts_mut(mem, area_len))
         .context("UMEM allocation failed")?;
     // Safety: page-aligned, sized, and intentionally leaked (lives for the run).
-    let umem = xe(
-        unsafe { Umem::new(UmemConfig::default(), area) },
-        "Umem::new",
-    )?;
+    let umem_cfg = UmemConfig {
+        fill_size: FILL_SIZE,
+        ..UmemConfig::default()
+    };
+    let umem = xe(unsafe { Umem::new(umem_cfg, area) }, "Umem::new")?;
 
     let mut info = IfInfo::invalid();
     let cname = std::ffi::CString::new(iface).unwrap();
@@ -93,7 +99,7 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     // One RX socket per proposer, bound with XDP_BIND_SHARED_UMEM and registered
     // in the XSKS map at key = proposer index.
     let rx_cfg = SocketConfig {
-        rx_size: NonZeroU32::new(RX_BATCH * 32),
+        rx_size: NonZeroU32::new(RX_SIZE),
         tx_size: None,
         bind_flags: shared_flags,
     };
@@ -121,7 +127,7 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     );
 
     // Prime the shared fill ring so the kernel has buffers to place RX frames in.
-    let fill_n = FILL_FRAMES.min(NUM_FRAMES as u32);
+    let fill_n = FILL_SIZE.min(NUM_FRAMES as u32);
     {
         let mut fill = device.fill(fill_n);
         let inserted = fill.insert((0..fill_n as u64).map(|i| i * FRAME_SIZE));
@@ -134,40 +140,83 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     let stats_map: PerCpuArray<_, u64> =
         PerCpuArray::try_from(ebpf.map("STATS").context("STATS map not found")?)?;
 
+    // Block on the RX rings with poll(2) and drain each readable ring until it is
+    // empty. poll sleeps the thread in the kernel while idle, so the loop costs
+    // nothing at rest and wakes only when a ring has frames; the inner drain then
+    // amortizes a burst of packets across one wakeup instead of one syscall each.
+    // POLL_TIMEOUT bounds how often an idle loop re-checks RUNNING and the
+    // duration.
+    //
+    // Note on copy-mode interfaces (veth, generic XDP): there is no DMA, so the
+    // kernel only moves frames into the RX ring while userspace is actively
+    // polling it. A driver with native XDP and zero-copy fills the ring from
+    // hardware independently, which is where poll-and-sleep turns into a real CPU
+    // saving over a per-packet recv() loop.
+    const POLL_TIMEOUT_MS: libc::c_int = 250;
+    let mut pfds: Vec<libc::pollfd> = proposers
+        .iter()
+        .map(|p| libc::pollfd {
+            fd: p.rx.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+
     info!("draining per-proposer rings; Ctrl-C to stop");
     let start = Instant::now();
     let mut last_report = Instant::now();
     let mut recycle: Vec<u64> = Vec::with_capacity((RX_BATCH as usize) * proposers.len());
 
     while RUNNING.load(Ordering::SeqCst) {
-        recycle.clear();
-        let mut got = 0u32;
-
-        for p in proposers.iter_mut() {
-            let mut reader = p.rx.receive(RX_BATCH);
-            while let Some(desc) = reader.read() {
-                p.pkts += 1;
-                p.bytes += desc.len as u64;
-                // Recycle the frame by aligning its address down to the frame base.
-                recycle.push(desc.addr & !(FRAME_SIZE - 1));
-                got += 1;
+        for pfd in pfds.iter_mut() {
+            pfd.revents = 0;
+        }
+        let n = unsafe {
+            libc::poll(
+                pfds.as_mut_ptr(),
+                pfds.len() as libc::nfds_t,
+                POLL_TIMEOUT_MS,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue; // interrupted by SIGINT; the loop condition re-checks RUNNING
             }
-            reader.release();
+            return Err(anyhow!("poll: {err}"));
         }
 
-        if !recycle.is_empty() {
-            {
-                let mut fill = device.fill(recycle.len() as u32);
-                fill.insert(recycle.iter().copied());
-                fill.commit();
-            } // drop `fill` to release the &mut device borrow before waking
-            if device.needs_wakeup() {
-                device.wake();
+        // Drain every ring until a full pass comes up empty, recycling each frame
+        // back into the shared fill ring as it is read. A poll timeout (n == 0)
+        // reads nothing and falls through to the RUNNING/duration checks below.
+        let mut got = 1u32;
+        while got > 0 {
+            got = 0;
+            recycle.clear();
+            for p in proposers.iter_mut() {
+                let mut reader = p.rx.receive(RX_BATCH);
+                while let Some(desc) = reader.read() {
+                    p.pkts += 1;
+                    p.bytes += desc.len as u64;
+                    // Recycle the frame by aligning its address down to its base.
+                    recycle.push(desc.addr & !(FRAME_SIZE - 1));
+                    got += 1;
+                }
+                reader.release();
             }
-        }
-
-        if got == 0 {
-            std::thread::sleep(Duration::from_micros(200));
+            if !recycle.is_empty() {
+                {
+                    let mut fill = device.fill(recycle.len() as u32);
+                    fill.insert(recycle.iter().copied());
+                    fill.commit();
+                } // drop `fill` to release the &mut device borrow before waking
+                if device.needs_wakeup() {
+                    device.wake();
+                }
+            }
+            if !RUNNING.load(Ordering::SeqCst) {
+                break;
+            }
         }
 
         if last_report.elapsed() >= Duration::from_secs(1) {
