@@ -66,7 +66,15 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     xe(info.from_name(cname.as_c_str()), "IfInfo::from_name")?;
     info.set_queue(0);
 
-    let bind_flags = SocketConfig::XDP_BIND_COPY; // generic XDP / veth -> copy mode
+    // Owner socket: its fd is the UMEM fd, so it binds non-shared and forces copy
+    // mode (veth / generic XDP has no zero-copy). That bind establishes the copy
+    // mode of the shared buffer pool the proposer sockets then inherit.
+    let owner_flags = SocketConfig::XDP_BIND_COPY;
+    // Proposer sockets share the owner's UMEM. xdpilone ORs XDP_BIND_SHARED_UMEM
+    // into their bind flags, and the kernel rejects SHARED_UMEM combined with
+    // COPY or ZEROCOPY (EINVAL), so their own flags must be empty. They take the
+    // copy/zero-copy mode from the pool the owner set up.
+    let shared_flags: u16 = 0;
 
     // Owner socket: shares the umem fd and owns the single fill/completion ring
     // for (iface, queue 0). It is never placed in the XSKS map, so it receives
@@ -77,7 +85,7 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     let owner_cfg = SocketConfig {
         rx_size: None,
         tx_size: NonZeroU32::new(64),
-        bind_flags,
+        bind_flags: owner_flags,
     };
     let owner_user = xe(umem.rx_tx(&owner, &owner_cfg), "rx_tx(owner)")?;
     xe(umem.bind(&owner_user), "bind(owner)")?;
@@ -87,7 +95,7 @@ pub fn run(ebpf: &mut aya::Ebpf, iface: &str, duration: Option<u64>) -> Result<(
     let rx_cfg = SocketConfig {
         rx_size: NonZeroU32::new(RX_BATCH * 32),
         tx_size: None,
-        bind_flags,
+        bind_flags: shared_flags,
     };
     let mut xsks: XskMap<_> =
         XskMap::try_from(ebpf.take_map("XSKS").context("XSKS map not found")?)?;
