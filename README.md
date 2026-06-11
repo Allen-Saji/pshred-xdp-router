@@ -145,8 +145,11 @@ higher pkt/s at lower CPU.
 - `pshred-router-common` unit tests pass (format round-trip, Eq. (1) including
   realistic ~1e11 values).
 - The userspace loader compiles clean under clippy.
-- The AF_XDP receive loop and the live redirect need root and the veth harness
-  to exercise. Run the steps above to confirm per-proposer ring delivery.
+- The full redirect path is verified on a veth + netns lab: sending 1000/500/250
+  pshreds to proposers 3/5/12 lands exactly p3=1000, p5=500, p12=250 in the
+  per-proposer rings (`redirected=1750`), with an out-of-range proposer and an
+  Equation (1) violation dropped (`range_drop`, `eq1_drop`) and nothing
+  misrouted. Reproduce with the steps above.
 
 ## License
 
