@@ -1,0 +1,4 @@
+[toolchain]
+# eBPF build (aya-build) needs nightly + rust-src for `-Z build-std=core`.
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy"]
