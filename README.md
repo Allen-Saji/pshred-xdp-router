@@ -134,9 +134,29 @@ sudo ip netns exec pshred /tmp/baseline_recv 10.0.0.2 9000   # reports pkt/s
 # flood from the root ns and watch pkt/s and CPU (pidstat -p <pid> 1)
 ```
 
-Then run the AF_XDP loader under the same flood and compare pkt/s and CPU. The
-AF_XDP path avoids the per-packet syscall and copy, so the gain shows up as
-higher pkt/s at lower CPU.
+Then run the AF_XDP loader under the same flood and compare pkt/s and CPU. See
+Performance below for measured results, including why copy-mode veth does not
+show a CPU win.
+
+## Performance
+
+Measured on the veth + netns lab (single RX queue, copy mode), one flooding
+thread against one receiver thread:
+
+    path                offered       delivered      ring loss   receiver CPU
+    recv() per packet   ~288k pkt/s   ~288k pkt/s    0           ~59% of one core
+    AF_XDP redirect     ~358k pkt/s   ~339k pkt/s    0           ~99% of one core
+
+The router demuxes losslessly: every packet the kernel hands the XDP program is
+redirected and drained (total == redirected, no_socket == 0). The small offered
+vs delivered gap is upstream loss on the veth TX path, not the router.
+
+This is not a CPU win on veth, by design. veth has no DMA, so the kernel only
+moves frames into the RX ring while userspace is actively polling it. A loop
+that sleeps to save CPU starves delivery and drops most of the traffic. The
+AF_XDP advantage - block in poll(), wake once per batch - needs a NIC with
+native XDP and zero-copy, where hardware fills the ring independently of the
+application. The same loop then blocks at idle and amortizes a burst per wakeup.
 
 ## Status
 
