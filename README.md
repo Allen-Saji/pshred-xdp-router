@@ -171,11 +171,3 @@ application. The same loop then blocks at idle and amortizes a burst per wakeup.
   Equation (1) violation dropped (`range_drop`, `eq1_drop`) and nothing
   misrouted. Reproduce with the steps above.
 
-## License
-
-Dual-licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
