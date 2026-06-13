@@ -132,14 +132,16 @@ fn try_pshred_router(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // Demux: redirect into this proposer's AF_XDP socket.
-    match XSKS.redirect(proposer as u32, 0) {
+    // Demux: redirect into this proposer's AF_XDP socket. The low bits of the
+    // flags argument are the action the kernel returns when the XSKMAP slot is
+    // empty, so we pass XDP_PASS: an unbound proposer's frame is handed back to
+    // the stack rather than blackholed. `redirect` returns Ok(XDP_REDIRECT) on a
+    // hit and Err(XDP_PASS) on a miss, so the two arms split cleanly.
+    match XSKS.redirect(proposer as u32, xdp_action::XDP_PASS as u64) {
         Ok(action) => {
             bump(stats::REDIRECTED);
             Ok(action)
         }
-        // No socket bound for this proposer yet: let the kernel keep the frame
-        // rather than blackholing it.
         Err(_) => {
             bump(stats::NO_SOCKET);
             Ok(xdp_action::XDP_PASS)
