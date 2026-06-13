@@ -93,7 +93,16 @@ fn try_pshred_router(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let udp_off = EthHdr::LEN + Ipv4Hdr::LEN;
+    // Honour the IHL: with IPv4 options the header is longer than 20 bytes, so
+    // the UDP header is not at a fixed offset. `ihl()` returns the header length
+    // in bytes; reject anything below the 20-byte minimum as malformed. (VLAN-
+    // tagged frames are out of scope: the EtherType check above only matches
+    // untagged IPv4.)
+    let ihl = unsafe { (*ip).ihl() } as usize;
+    if ihl < Ipv4Hdr::LEN {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let udp_off = EthHdr::LEN + ihl;
     let udp: *const UdpHdr = ptr_at(ctx, udp_off)?;
     // dst_port() already converts network -> host byte order.
     if unsafe { (*udp).dst_port() } != PSHRED_UDP_PORT {
