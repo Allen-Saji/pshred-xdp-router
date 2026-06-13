@@ -10,26 +10,7 @@ per-packet syscall on the hot path.
 The pshred wire format follows the Solana Constellation white paper (v0.9,
 Definition 3). The project was built as a Turbin3 Advanced SVM exercise.
 
-```
-  ingress (NIC / veth)
-          |
-          v
-  +-------------------------------+
-  |  XDP: pshred_router           |   (kernel)
-  |  read proposer j, then        |
-  |  bpf_redirect_map -> XSKS[j]  |
-  +-------------------------------+
-          |
-   +------+------+----- ... -----+
-   |      |      |               |
-   v      v      v               v
-  sk1    sk2    sk3     ...     sk16     (userspace AF_XDP sockets,
-  RX     RX     RX             RX         one per proposer)
-   |      |      |               |
-   +------+------+----- ... -----+
-          |
-   shared UMEM + single fill/completion ring (queue 0)
-```
+![pshred XDP demultiplexer architecture](docs/architecture.png)
 
 ## Wire format
 
