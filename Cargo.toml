@@ -13,9 +13,11 @@ license = "MIT OR Apache-2.0"
 edition = "2021"
 
 [workspace.dependencies]
-aya = { git = "https://github.com/aya-rs/aya", default-features = false }
-aya-build = { git = "https://github.com/aya-rs/aya", default-features = false }
-aya-ebpf = { git = "https://github.com/aya-rs/aya", default-features = false }
+# Pinned by rev: aya has no stable crates.io release, so a bare git dep would
+# float to HEAD on `cargo update`. This rev matches the committed Cargo.lock.
+aya = { git = "https://github.com/aya-rs/aya", rev = "a0b8d4911879f40f3127791ec474d438c23b59ff", default-features = false }
+aya-build = { git = "https://github.com/aya-rs/aya", rev = "a0b8d4911879f40f3127791ec474d438c23b59ff", default-features = false }
+aya-ebpf = { git = "https://github.com/aya-rs/aya", rev = "a0b8d4911879f40f3127791ec474d438c23b59ff", default-features = false }
 
 anyhow = { version = "1", default-features = false }
 cargo_metadata = { version = "0.23.0", default-features = false }
