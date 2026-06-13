@@ -82,6 +82,7 @@ Counters live in the per-CPU `STATS` map; indices are shared with userspace via
 
 ```
 pshred-router-common/      wire format, offsets, Eq. (1), stat indices
+  examples/baseline_recv.rs  per-syscall UDP baseline for the benchmark
 pshred-router-ebpf/        the XDP program (XSKMAP redirect demux)
 pshred-router/             userspace loader
   src/main.rs                CLI, load + attach, path selection
@@ -89,7 +90,6 @@ pshred-router/             userspace loader
   src/stats.rs               STATS counter reads
 xtask/                     dev tasks: setup, build, check
 scripts/veth.sh            veth + netns lab up/down
-scripts/baseline_recv.rs   per-syscall UDP baseline for the benchmark
 send_shred.sh              pshred packet generator
 ```
 
@@ -129,8 +129,8 @@ sudo ip netns exec pshred ./target/debug/pshred_router -i veth1 --no-xsk
 Baseline is one `recv()` syscall per packet with XDP detached:
 
 ```
-rustc -O scripts/baseline_recv.rs -o /tmp/baseline_recv
-sudo ip netns exec pshred /tmp/baseline_recv 10.0.0.2 9000   # reports pkt/s
+cargo build --release -p pshred-router-common --example baseline_recv
+sudo ip netns exec pshred ./target/release/examples/baseline_recv 10.0.0.2 9000   # reports pkt/s
 # flood from the root ns and watch pkt/s and CPU (pidstat -p <pid> 1)
 ```
 
