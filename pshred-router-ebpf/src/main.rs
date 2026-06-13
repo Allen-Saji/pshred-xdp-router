@@ -93,7 +93,16 @@ fn try_pshred_router(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let udp_off = EthHdr::LEN + Ipv4Hdr::LEN;
+    // Honour the IHL: with IPv4 options the header is longer than 20 bytes, so
+    // the UDP header is not at a fixed offset. `ihl()` returns the header length
+    // in bytes; reject anything below the 20-byte minimum as malformed. (VLAN-
+    // tagged frames are out of scope: the EtherType check above only matches
+    // untagged IPv4.)
+    let ihl = unsafe { (*ip).ihl() } as usize;
+    if ihl < Ipv4Hdr::LEN {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let udp_off = EthHdr::LEN + ihl;
     let udp: *const UdpHdr = ptr_at(ctx, udp_off)?;
     // dst_port() already converts network -> host byte order.
     if unsafe { (*udp).dst_port() } != PSHRED_UDP_PORT {
@@ -123,14 +132,16 @@ fn try_pshred_router(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // Demux: redirect into this proposer's AF_XDP socket.
-    match XSKS.redirect(proposer as u32, 0) {
+    // Demux: redirect into this proposer's AF_XDP socket. The low bits of the
+    // flags argument are the action the kernel returns when the XSKMAP slot is
+    // empty, so we pass XDP_PASS: an unbound proposer's frame is handed back to
+    // the stack rather than blackholed. `redirect` returns Ok(XDP_REDIRECT) on a
+    // hit and Err(XDP_PASS) on a miss, so the two arms split cleanly.
+    match XSKS.redirect(proposer as u32, xdp_action::XDP_PASS as u64) {
         Ok(action) => {
             bump(stats::REDIRECTED);
             Ok(action)
         }
-        // No socket bound for this proposer yet: let the kernel keep the frame
-        // rather than blackholing it.
         Err(_) => {
             bump(stats::NO_SOCKET);
             Ok(xdp_action::XDP_PASS)

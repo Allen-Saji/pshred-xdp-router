@@ -1,11 +1,13 @@
 //! Baseline UDP receiver: one recv() syscall per packet, no kernel bypass.
 //!
-//! This is the comparison point for the AF_XDP fast path. Build and run it
+//! This is the comparison point for the AF_XDP fast path. It lives as an example
+//! of `pshred-router-common` because that crate builds without the eBPF
+//! toolchain (no bpf-linker / LLVM), so the baseline compiles on its own. Run it
 //! WITHOUT the XDP program attached (the XDP redirect would otherwise steal the
 //! packets before they reach this socket):
 //!
-//!   rustc -O scripts/baseline_recv.rs -o /tmp/baseline_recv
-//!   sudo ip netns exec pshred /tmp/baseline_recv 10.0.0.2
+//!   cargo build --release -p pshred-router-common --example baseline_recv
+//!   sudo ip netns exec pshred ./target/release/examples/baseline_recv 10.0.0.2 9000
 //!   # from the root ns, flood it:
 //!   ./send_shred.sh 10.0.0.2 3 2000000
 //!
@@ -16,7 +18,9 @@ use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 fn main() {
-    let bind = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0".to_string());
+    let bind = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "0.0.0.0".to_string());
     let port: u16 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -34,13 +38,11 @@ fn main() {
     let mut window = Instant::now();
 
     loop {
-        match sock.recv_from(&mut buf) {
-            Ok((n, _)) => {
-                count += 1;
-                bytes += n as u64;
-                total += 1;
-            }
-            Err(_) => {} // timeout; fall through to report
+        // A read timeout (WouldBlock) just falls through to the periodic report.
+        if let Ok((n, _)) = sock.recv_from(&mut buf) {
+            count += 1;
+            bytes += n as u64;
+            total += 1;
         }
         if window.elapsed() >= Duration::from_secs(1) {
             let secs = window.elapsed().as_secs_f64();
